@@ -1,28 +1,29 @@
 """
-BillPipeline - 核心处理流水线
+BillPipeline - 账单处理总流水线
 
-处理步骤:
-  1. Load      读取原始数据（通过适配器）
-  2. Filter    过滤不需要的行
-  3. Map       字段映射 + 金额公式计算
-  4. Reference 关联公共配置表（类目/科目映射等）
-  5. Aggregate 汇总计算
-  6. Output    写出结果
+架构分两层：
 
-每个步骤都是独立模块，可单独测试或替换。
+  Layer 1: 标准化（每平台一个配置文件，配置驱动，无需改代码）
+    BillNormalizer(平台A配置) → 统一格式 DataFrame
+    BillNormalizer(平台B配置) → 统一格式 DataFrame
+    BillNormalizer(平台C配置) → 统一格式 DataFrame
+                ↓ pd.concat
+            合并统一 DataFrame
+
+  Layer 2: 统一处理（所有平台共用，业务逻辑在 processor.py 代码中）
+    UnifiedProcessor → 关联配置表 → 汇总 → 最终输出
 """
 
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 import pandas as pd
 
+from .normalizer import BillNormalizer
+from .processor import UnifiedProcessor
 from .config_loader import PlatformConfig
-from .filter import apply_filter
-from .mapper import FieldMapper
-from .reference import ReferenceManager
-from .aggregator import Aggregator
-from ..adapters import get_adapter
+from .processing_config import ProcessingConfig
 from ..output import get_writer
 
 logger = logging.getLogger(__name__)
@@ -30,136 +31,129 @@ logger = logging.getLogger(__name__)
 
 class BillPipeline:
     """
-    账单处理流水线。
+    多平台账单处理总流水线。
 
-    用法:
-        config = PlatformConfig.from_file("config/alipay.yaml")
-        pipeline = BillPipeline(config)
+    用法（完整流程）:
+        pipeline = BillPipeline(
+            platform_configs=[
+                PlatformConfig.from_file("config/alipay.yaml"),
+                PlatformConfig.from_file("config/wechat.yaml"),
+            ],
+            processing_config=ProcessingConfig.from_file("config/processing.yaml"),
+        )
         result_df = pipeline.run()
 
-    或直接使用类方法:
-        result_df = BillPipeline.run_from_file("config/alipay.yaml")
+    用法（单平台标准化，调试用）:
+        normalizer = BillNormalizer(PlatformConfig.from_file("config/alipay.yaml"))
+        unified_df = normalizer.normalize()
     """
 
-    def __init__(self, config: PlatformConfig):
-        self.config = config
-        self._steps_override: dict[str, Any] = {}
+    def __init__(
+        self,
+        platform_configs: list[PlatformConfig],
+        processing_config: ProcessingConfig | None = None,
+    ):
+        self.platform_configs = platform_configs
+        self.processing_config = processing_config or ProcessingConfig.from_dict({})
 
     # ------------------------------------------------------------------ #
-    #  工厂 / 便捷入口
+    #  工厂方法
     # ------------------------------------------------------------------ #
 
     @classmethod
-    def run_from_file(cls, config_path: str) -> pd.DataFrame:
-        """一行代码运行完整流水线"""
-        config = PlatformConfig.from_file(config_path)
-        return cls(config).run()
+    def from_files(
+        cls,
+        platform_config_paths: list[str | Path],
+        processing_config_path: str | Path | None = None,
+    ) -> "BillPipeline":
+        """从文件路径构建流水线"""
+        platform_configs = [
+            PlatformConfig.from_file(p) for p in platform_config_paths
+        ]
+        processing_config = (
+            ProcessingConfig.from_file(processing_config_path)
+            if processing_config_path
+            else ProcessingConfig.from_dict({})
+        )
+        return cls(platform_configs, processing_config)
 
     @classmethod
-    def run_from_dict(cls, config_dict: dict) -> pd.DataFrame:
-        config = PlatformConfig.from_dict(config_dict)
-        return cls(config).run()
+    def from_platform_dir(
+        cls,
+        platform_dir: str | Path,
+        processing_config_path: str | Path | None = None,
+    ) -> "BillPipeline":
+        """扫描目录下所有 *.yaml 文件作为平台配置（排除 processing.yaml）"""
+        platform_dir = Path(platform_dir)
+        paths = sorted(
+            p for p in platform_dir.glob("*.yaml")
+            if p.name != "processing.yaml"
+        )
+        if not paths:
+            raise ValueError(f"目录 {platform_dir} 中未找到平台配置文件")
+        return cls.from_files(paths, processing_config_path)
 
     # ------------------------------------------------------------------ #
     #  主流程
     # ------------------------------------------------------------------ #
 
-    def run(self, source_df: pd.DataFrame | None = None) -> pd.DataFrame:
+    def run(
+        self,
+        source_dfs: dict[str, pd.DataFrame] | None = None,
+    ) -> pd.DataFrame:
         """
-        执行完整流水线，返回统一格式 DataFrame。
+        执行完整流水线：标准化所有平台 → 合并 → 统一处理 → 输出。
 
         Args:
-            source_df: 可直接传入已加载的 DataFrame（跳过 Load 步骤），
-                       主要用于测试。
+            source_dfs: {platform_name: DataFrame}，直接提供原始数据跳过 Load 步骤，
+                        主要用于单元测试。
+
+        Returns:
+            汇总处理后的 DataFrame。
         """
-        platform = self.config.platform
-        logger.info("[%s] 开始处理", platform)
+        # ── Layer 1：标准化各平台 ──────────────────────────────────────
+        unified_frames: list[pd.DataFrame] = []
+        for cfg in self.platform_configs:
+            raw = (source_dfs or {}).get(cfg.platform)
+            normalizer = BillNormalizer(cfg)
+            unified = normalizer.normalize(source_df=raw)
 
-        # 1. Load
-        if source_df is None:
-            df = self._step_load()
-        else:
-            df = source_df.copy()
-        logger.info("[%s] Load 完成，共 %d 行", platform, len(df))
+            # 可选：将单平台标准化结果写到中间输出
+            if cfg.output:
+                self._write_intermediate(unified, cfg)
 
-        # 2. Filter（在原始列名阶段过滤）
-        df = self._step_filter(df)
-        logger.info("[%s] Filter 完成，剩余 %d 行", platform, len(df))
+            unified_frames.append(unified)
 
-        # 3. Map
-        df = self._step_map(df)
-        logger.info("[%s] Map 完成，列: %s", platform, list(df.columns))
+        if not unified_frames:
+            raise ValueError("没有平台数据可处理")
 
-        # 4. Reference
-        df = self._step_reference(df)
-        logger.info("[%s] Reference 完成，列: %s", platform, list(df.columns))
+        combined = pd.concat(unified_frames, ignore_index=True)
+        logger.info("所有平台合并完成，共 %d 行", len(combined))
 
-        # 5. Aggregate
-        df = self._step_aggregate(df)
-        logger.info("[%s] Aggregate 完成，共 %d 行", platform, len(df))
+        # ── Layer 2：统一业务处理 ──────────────────────────────────────
+        processor = UnifiedProcessor(self.processing_config)
+        result = processor.process(combined)
 
-        # 6. Output
-        self._step_output(df)
+        # 写出最终结果
+        if self.processing_config.output:
+            self._write_final(result)
 
-        return df
+        return result
 
     # ------------------------------------------------------------------ #
-    #  各步骤实现
+    #  输出
     # ------------------------------------------------------------------ #
 
-    def _step_load(self) -> pd.DataFrame:
-        source_cfg = self.config.source
-        adapter_cls = get_adapter(source_cfg["type"])
-        return adapter_cls(source_cfg).load()
-
-    def _step_filter(self, df: pd.DataFrame) -> pd.DataFrame:
-        return apply_filter(df, self.config.filter)
-
-    def _step_map(self, df: pd.DataFrame) -> pd.DataFrame:
-        return FieldMapper(self.config).transform(df)
-
-    def _step_reference(self, df: pd.DataFrame) -> pd.DataFrame:
-        if not self.config.references:
-            return df
-        return ReferenceManager(self.config.references).apply(df)
-
-    def _step_aggregate(self, df: pd.DataFrame) -> pd.DataFrame:
-        agg_cfg = self.config.aggregation
-        if not agg_cfg:
-            return df
-        return Aggregator(agg_cfg).run(df)
-
-    def _step_output(self, df: pd.DataFrame) -> None:
-        output_cfg = self.config.output
-        if not output_cfg or not output_cfg.get("path"):
-            return
+    def _write_intermediate(self, df: pd.DataFrame, cfg: PlatformConfig) -> None:
+        """写出单平台标准化数据（中间持久化）"""
+        output_cfg = cfg.output
         writer = get_writer(output_cfg)
         writer.write(df, output_cfg)
-        logger.info(
-            "[%s] 输出完成: %s",
-            self.config.platform,
-            output_cfg.get("path"),
-        )
+        logger.info("[%s] 中间数据已写出: %s", cfg.platform, output_cfg.get("path"))
 
-    # ------------------------------------------------------------------ #
-    #  分步运行（方便调试 / 单元测试）
-    # ------------------------------------------------------------------ #
-
-    def load(self) -> pd.DataFrame:
-        return self._step_load()
-
-    def filter(self, df: pd.DataFrame) -> pd.DataFrame:
-        return self._step_filter(df)
-
-    def map(self, df: pd.DataFrame) -> pd.DataFrame:
-        return self._step_map(df)
-
-    def reference(self, df: pd.DataFrame) -> pd.DataFrame:
-        return self._step_reference(df)
-
-    def aggregate(self, df: pd.DataFrame) -> pd.DataFrame:
-        return self._step_aggregate(df)
-
-
-# 补充类型注解
-from typing import Any
+    def _write_final(self, df: pd.DataFrame) -> None:
+        """写出最终汇总结果"""
+        output_cfg = self.processing_config.output
+        writer = get_writer(output_cfg)
+        writer.write(df, output_cfg)
+        logger.info("最终结果已写出: %s", output_cfg.get("path"))

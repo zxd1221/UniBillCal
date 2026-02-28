@@ -2,9 +2,14 @@
 UniBillCal 命令行入口
 
 用法:
-    python main.py --platform alipay
-    python main.py --config config/alipay.yaml
-    python main.py --config config/alipay.yaml config/wechat.yaml  # 批量处理
+  # 处理指定平台配置 + 统一处理配置
+  python main.py --processing config/processing.yaml --platforms config/alipay.yaml config/wechat.yaml
+
+  # 扫描 config/ 目录下所有平台配置（自动排除 processing.yaml）
+  python main.py --processing config/processing.yaml --platform-dir config/
+
+  # 只标准化单个平台（调试用，验证字段映射是否正确）
+  python main.py --normalize config/alipay.yaml
 """
 
 import argparse
@@ -12,7 +17,7 @@ import logging
 import sys
 from pathlib import Path
 
-from unibillcal import BillPipeline, PlatformConfig
+from unibillcal import BillPipeline, BillNormalizer, PlatformConfig
 
 
 logging.basicConfig(
@@ -25,82 +30,79 @@ logger = logging.getLogger("main")
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="UniBillCal - 多平台账单统一处理框架"
+        description="UniBillCal - 多平台账单统一处理框架",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
     )
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument(
-        "--platform",
-        help="平台名称（自动在 config/ 目录下查找 <platform>.yaml）",
+    parser.add_argument(
+        "--processing",
+        metavar="PROCESSING_YAML",
+        default="config/processing.yaml",
+        help="统一处理配置文件路径（含关联表 + 最终输出配置，默认 config/processing.yaml）",
     )
-    group.add_argument(
-        "--config",
+
+    source_group = parser.add_mutually_exclusive_group()
+    source_group.add_argument(
+        "--platforms",
         nargs="+",
-        help="配置文件路径（支持多个文件批量处理）",
+        metavar="PLATFORM_YAML",
+        help="一个或多个平台配置文件路径",
     )
-    parser.add_argument(
-        "--config-dir",
+    source_group.add_argument(
+        "--platform-dir",
+        metavar="DIR",
         default="config",
-        help="配置文件目录（与 --platform 配合使用，默认 config/）",
+        help="扫描目录下所有 *.yaml 文件作为平台配置（默认 config/）",
     )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="只执行到 Map 步骤，不写出文件（用于验证配置）",
+    source_group.add_argument(
+        "--normalize",
+        metavar="PLATFORM_YAML",
+        help="只标准化单个平台（调试模式，不执行汇总）",
     )
+
     return parser.parse_args()
 
 
-def run_config(config_path: str, dry_run: bool = False) -> bool:
-    """运行单个配置文件，返回是否成功"""
-    try:
-        logger.info("加载配置: %s", config_path)
-        config = PlatformConfig.from_file(config_path)
-        pipeline = BillPipeline(config)
-
-        if dry_run:
-            raw_df = pipeline.load()
-            filtered = pipeline.filter(raw_df)
-            mapped = pipeline.map(filtered)
-            logger.info(
-                "[%s] DRY-RUN 完成，映射后共 %d 行，列: %s",
-                config.platform,
-                len(mapped),
-                list(mapped.columns),
-            )
-        else:
-            result = pipeline.run()
-            logger.info(
-                "[%s] 处理完成，输出 %d 行",
-                config.platform,
-                len(result),
-            )
-        return True
-    except Exception as exc:
-        logger.error("处理 %s 失败: %s", config_path, exc, exc_info=True)
-        return False
+def cmd_normalize(platform_yaml: str) -> None:
+    """只执行单平台标准化，打印结果（用于验证配置）"""
+    config = PlatformConfig.from_file(platform_yaml)
+    normalizer = BillNormalizer(config)
+    raw = normalizer.load()
+    filtered = normalizer.filter(raw)
+    unified = normalizer.map(filtered)
+    logger.info(
+        "[%s] 标准化完成：%d 行 → %d 行，统一字段: %s",
+        config.platform, len(raw), len(unified), list(unified.columns),
+    )
+    print(unified.head(10).to_string(index=False))
 
 
 def main():
     args = parse_args()
 
-    config_files = []
-    if args.platform:
-        config_path = Path(args.config_dir) / f"{args.platform}.yaml"
-        if not config_path.exists():
-            logger.error("配置文件不存在: %s", config_path)
-            sys.exit(1)
-        config_files = [str(config_path)]
-    else:
-        config_files = args.config
+    try:
+        if args.normalize:
+            cmd_normalize(args.normalize)
+            return
 
-    success_count = 0
-    for cfg_path in config_files:
-        if run_config(cfg_path, dry_run=args.dry_run):
-            success_count += 1
+        processing_path = args.processing if Path(args.processing).exists() else None
 
-    total = len(config_files)
-    logger.info("完成 %d/%d 个平台处理", success_count, total)
-    if success_count < total:
+        if args.platforms:
+            pipeline = BillPipeline.from_files(
+                platform_config_paths=args.platforms,
+                processing_config_path=processing_path,
+            )
+        else:
+            pipeline = BillPipeline.from_platform_dir(
+                args.platform_dir,
+                processing_config_path=processing_path,
+            )
+
+        result = pipeline.run()
+        logger.info("处理完成，最终输出 %d 行", len(result))
+
+    except Exception as exc:
+        logger.error("执行失败: %s", exc, exc_info=True)
         sys.exit(1)
 
 

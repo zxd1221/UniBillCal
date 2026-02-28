@@ -1,8 +1,17 @@
 """
-平台配置加载器 - 负责读取和验证 YAML 配置文件
+平台配置加载器
+
+平台配置只负责"数据标准化"：
+  - 从哪里读数据（source）
+  - 过滤哪些行（filter）
+  - 字段怎么映射到统一格式（field_mapping + amount_formula）
+  - 标准化结果写到哪里（output，可选）
+
+汇总计算、关联配置表等业务逻辑不在此处——由 UnifiedProcessor 统一处理。
 """
 
-import os
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Any
 import yaml
@@ -10,18 +19,17 @@ import yaml
 
 class PlatformConfig:
     """
-    封装单个平台的 YAML 配置，提供类型安全的访问接口。
+    单个平台的标准化配置。
 
-    YAML 顶层结构:
+    YAML 结构（只包含平台特有的内容）:
       platform:       平台标识（如 alipay、wechat）
       description:    描述（可选）
-      source:         数据源配置（type、path/connection_string 等）
+      source:         数据源（type + 位置信息）
       filter:         行过滤条件（可选）
-      field_mapping:  标准字段 → 源字段 的映射
-      amount_formula: 金额计算公式（使用源字段名）
-      references:     关联配置表列表（可选）
-      aggregation:    汇总规则
-      output:         输出配置
+      field_mapping:  标准字段 -> 源字段的映射
+      amount_formula: 金额计算公式（与 field_mapping.amount 二选一）
+      extra_fields:   额外保留的源字段（可选）
+      output:         标准化结果的输出位置（可选）
     """
 
     def __init__(self, config: dict):
@@ -79,17 +87,9 @@ class PlatformConfig:
         return self._cfg.get("amount_formula", "")
 
     @property
-    def references(self) -> list[dict]:
-        """关联配置表列表"""
-        return self._cfg.get("references", [])
-
-    @property
-    def aggregation(self) -> dict:
-        return self._cfg.get("aggregation", {})
-
-    @property
-    def output(self) -> dict:
-        return self._cfg.get("output", {})
+    def output(self) -> dict | None:
+        """标准化数据的中间输出（可选）"""
+        return self._cfg.get("output")
 
     @property
     def extra_fields(self) -> list[str]:
