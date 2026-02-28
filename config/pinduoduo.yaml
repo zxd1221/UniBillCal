@@ -1,0 +1,105 @@
+# ============================================================
+# 拼多多账单处理配置
+# ============================================================
+platform: pinduoduo
+description: 拼多多平台账单标准化处理
+
+# ----------------------------------------------------------
+# 数据源（Excel 文件，每月一个文件）
+# ----------------------------------------------------------
+source:
+  type: excel
+  path: data/pinduoduo_bills.xlsx
+  sheet: 订单列表
+  skiprows: 0
+  # 强制指定某些列的类型，避免 pandas 自动推断错误
+  dtype:
+    订单号: str
+
+# ----------------------------------------------------------
+# 行过滤：只保留已完成订单
+# ----------------------------------------------------------
+filter:
+  conditions:
+    - column: 订单状态
+      op: in
+      value: [已完成, 已收货]
+    - column: 实付金额
+      op: gt
+      value: 0
+
+# ----------------------------------------------------------
+# 字段映射
+# ----------------------------------------------------------
+field_mapping:
+  date: 付款时间
+  store: 店铺名称
+  order_id: 订单号
+  remark: 商品名称
+
+# 拼多多金额公式：实付金额 - 退款金额 + 平台补贴
+amount_formula: "实付金额 - 退款金额 + 平台补贴"
+
+# ----------------------------------------------------------
+# 额外保留字段（不在标准字段内但需要输出）
+# ----------------------------------------------------------
+extra_fields:
+  - 商品名称
+  - 商品数量
+
+# ----------------------------------------------------------
+# 关联配置表
+# ----------------------------------------------------------
+references:
+  - name: category_mapping
+    source:
+      type: excel
+      path: config/category_map.xlsx
+      sheet: 拼多多
+    join_on:
+      left: store
+      right: 店铺名称
+    fields:
+      category: 类目名称
+      subject: 科目代码
+
+  - name: subject_detail
+    source:
+      type: excel
+      path: config/subject_map.xlsx
+      sheet: Sheet1
+    join_on:
+      left: category
+      right: 类目名称
+    fields:
+      subject_detail: 明细科目
+
+# ----------------------------------------------------------
+# 汇总规则
+# ----------------------------------------------------------
+aggregation:
+  strategy: standard
+  group_by: [date, store, category, subject, platform]
+  sum_fields: [amount]
+  count_field: order_count
+  custom_rules:
+    platform_subsidy:
+      func: sum
+      source: 平台补贴   # 单独汇总平台补贴金额
+
+# ----------------------------------------------------------
+# 输出
+# ----------------------------------------------------------
+output:
+  format: excel
+  path: output/pinduoduo_unified.xlsx
+  sheet: 拼多多统一账单
+  columns:
+    - date
+    - store
+    - category
+    - subject
+    - amount
+    - platform_subsidy
+    - order_count
+    - platform

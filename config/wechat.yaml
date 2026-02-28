@@ -1,0 +1,77 @@
+# ============================================================
+# 微信支付账单处理配置
+# ============================================================
+platform: wechat
+description: 微信支付平台账单标准化处理
+
+# ----------------------------------------------------------
+# 数据源（SQL Server 数据库表）
+# ----------------------------------------------------------
+source:
+  type: sqlserver
+  connection_string: "mssql+pyodbc://sa:password@localhost/BillDB?driver=ODBC+Driver+17+for+SQL+Server"
+  # 也可以直接写 table 名（SELECT * FROM [table]）
+  # table: wechat_bill
+  # 或者写自定义 SQL 查询（支持日期范围过滤等）
+  query: >
+    SELECT *
+    FROM [dbo].[wechat_bill]
+    WHERE 交易状态 IN ('支付成功', '已退款')
+
+# ----------------------------------------------------------
+# 行过滤（在 query 基础上二次过滤）
+# ----------------------------------------------------------
+filter:
+  column: 收支
+  op: eq
+  value: 收入
+
+# ----------------------------------------------------------
+# 字段映射
+# ----------------------------------------------------------
+field_mapping:
+  date: 交易时间
+  store: 商品名称
+  order_id: 微信单号
+  remark: 当前状态
+
+# 微信账单：实收金额 = 收入金额，但需减去退款
+amount_formula: "金额(元) - 退款金额(元)"
+
+# ----------------------------------------------------------
+# 关联配置表（从数据库读取）
+# ----------------------------------------------------------
+references:
+  - name: category_mapping
+    source:
+      type: sqlserver
+      connection_string: "mssql+pyodbc://sa:password@localhost/BillDB?driver=ODBC+Driver+17+for+SQL+Server"
+      table: CategoryMapping
+    join_on:
+      left: store
+      right: store_keyword   # 模糊匹配需自行在 query 中处理
+    fields:
+      category: category_name
+      subject: subject_code
+
+# ----------------------------------------------------------
+# 汇总规则
+# ----------------------------------------------------------
+aggregation:
+  strategy: standard
+  group_by: [date, store, category, subject, platform]
+  sum_fields: [amount]
+  count_field: order_count
+
+# ----------------------------------------------------------
+# 输出：金蝶凭证格式
+# ----------------------------------------------------------
+output:
+  format: kingdee
+  path: output/wechat_voucher.xlsx
+  sheet: 微信凭证
+  voucher_type: 记账凭证
+  debit_subject: "1122.01"     # 借方：应收账款-微信
+  credit_subject: "6001.01"    # 贷方：主营业务收入-线上
+  summary_template: "{store} {date} 微信销售收入"
+  currency: RMB
