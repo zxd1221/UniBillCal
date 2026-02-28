@@ -1,29 +1,35 @@
 """
-字段映射器 - 将平台原始 DataFrame 映射为统一字段名的 DataFrame
+字段映射器（FieldMapper）
+
+职责：将平台原始 DataFrame → 统一标准格式 DataFrame
+
+此层只做结构转换，不包含任何业务规则：
+  1. 字段重命名（按 field_mapping 配置）
+  2. 金额公式计算（raw_amount = formula 结果；amount = raw_amount 初始值）
+  3. 基础数据清洗（日期解析、空值处理）
+  4. 自动注入元数据字段（platform / source_type / source_id）
+
+统一字段名（配置中的 key）对应 UNIFIED_FIELDS：
+  business_date / store_name / order_no / ...
 """
 
 import pandas as pd
 from .formula import apply_formula
 from .config_loader import PlatformConfig
+from ..models.unified import UNIFIED_FIELDS
 
-
-# 统一格式的核心字段
-_CORE_FIELDS = ["date", "store", "order_id", "amount", "platform", "remark"]
+# 必填的映射字段（配置中必须包含）
+_REQUIRED_MAPPING_KEYS = {"business_date"}
 
 
 class FieldMapper:
     """
-    根据 PlatformConfig 中的 field_mapping 和 amount_formula，
-    将原始 DataFrame 转换为包含统一字段的 DataFrame。
+    根据 PlatformConfig 将原始 DataFrame 转换为统一格式。
 
-    field_mapping 格式（YAML 侧）:
-        date:     交易时间
-        store:    商家名称
-        order_id: 商户订单号   # 可选
-        remark:   备注         # 可选
-
-    amount_formula（与 field_mapping 中的 amount 二选一）:
-        "支付金额 - 退款金额"
+    配置示例（YAML field_mapping 节）:
+        business_date: 交易时间      # 统一字段名: 源列名
+        store_name:    商家名称
+        order_no:      商户订单号     # 可选
     """
 
     def __init__(self, config: PlatformConfig):
@@ -31,55 +37,114 @@ class FieldMapper:
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        执行字段映射，返回统一字段名的 DataFrame。
-        原始列中不在映射表里的列将被丢弃（extra_fields 除外）。
+        执行映射，返回统一格式 DataFrame。
+
+        新增字段说明：
+          raw_amount  - 金额公式的直接计算结果
+          amount      - 初始值与 raw_amount 相同，Processor 可按业务规则调整
+          source_type - 自动从 config.source.type 注入
+          source_id   - 优先用 order_no，否则自动生成 "{platform}_{index}"
         """
         df = df.copy()
+        mapping: dict[str, str] = self.config.field_mapping  # unified_key -> source_col
         result = pd.DataFrame(index=df.index)
 
-        mapping = self.config.field_mapping  # standard -> source
-        # 1. 先执行金额公式（使用原始列名）
-        if self.config.amount_formula:
-            result["amount"] = apply_formula(df, self.config.amount_formula)
-        elif "amount" in mapping:
-            src_col = mapping["amount"]
-            self._check_col_exists(df, src_col, "amount")
-            result["amount"] = pd.to_numeric(df[src_col], errors="coerce").fillna(0)
+        # ── 1. 金额计算 ────────────────────────────────────────────────
+        raw_amount = self._compute_raw_amount(df, mapping)
+        result["raw_amount"] = raw_amount
+        result["amount"] = raw_amount  # Processor 可按需调整 amount
 
-        # 2. 映射其他标准字段
-        for std_field, src_col in mapping.items():
-            if std_field == "amount":
+        # ── 2. 映射其他标准字段 ────────────────────────────────────────
+        for std_key, src_col in mapping.items():
+            if std_key in ("amount", "raw_amount"):
                 continue  # 已处理
             if src_col not in df.columns:
-                # 非必填字段缺失时填 None，必填字段报错
-                if std_field in ("date",):
+                if std_key in _REQUIRED_MAPPING_KEYS:
                     raise ValueError(
                         f"平台 {self.config.platform!r}: "
-                        f"字段 '{std_field}' 映射的源列 '{src_col}' 不存在，"
+                        f"字段 '{std_key}' 映射的源列 '{src_col}' 不存在，"
                         f"实际列: {list(df.columns)}"
                     )
-                result[std_field] = None
+                result[std_key] = None
             else:
-                result[std_field] = df[src_col]
+                result[std_key] = df[src_col]
 
-        # 3. 日期标准化
-        if "date" in result.columns:
-            result["date"] = pd.to_datetime(result["date"], errors="coerce").dt.date
+        # ── 3. 日期标准化 ──────────────────────────────────────────────
+        if "business_date" in result.columns:
+            result["business_date"] = (
+                pd.to_datetime(result["business_date"], errors="coerce").dt.date
+            )
 
-        # 4. 注入平台标识
+        # ── 4. 字符串列去首尾空格 ─────────────────────────────────────
+        str_cols = result.select_dtypes(include="object").columns
+        for col in str_cols:
+            result[col] = result[col].apply(
+                lambda v: v.strip() if isinstance(v, str) else v
+            )
+
+        # ── 5. 自动注入元数据 ──────────────────────────────────────────
         result["platform"] = self.config.platform
+        result["source_type"] = self.config.source.get("type", "unknown")
+        result["source_id"] = self._build_source_id(df, result, mapping)
 
-        # 5. 保留额外字段（extra_fields）
+        # ── 6. 保留额外字段 ────────────────────────────────────────────
         for col in self.config.extra_fields:
             if col in df.columns:
                 result[col] = df[col]
 
         return result
 
-    def _check_col_exists(self, df: pd.DataFrame, col: str, std_field: str) -> None:
-        if col not in df.columns:
-            raise ValueError(
-                f"平台 {self.config.platform!r}: "
-                f"字段 '{std_field}' 映射的源列 '{col}' 不存在，"
-                f"实际列: {list(df.columns)}"
-            )
+    # ------------------------------------------------------------------ #
+    #  内部方法
+    # ------------------------------------------------------------------ #
+
+    def _compute_raw_amount(
+        self, df: pd.DataFrame, mapping: dict[str, str]
+    ) -> pd.Series:
+        """计算原始金额（公式或直接映射）"""
+        if self.config.amount_formula:
+            return apply_formula(df, self.config.amount_formula)
+
+        if "amount" in mapping:
+            src_col = mapping["amount"]
+            if src_col not in df.columns:
+                raise ValueError(
+                    f"平台 {self.config.platform!r}: "
+                    f"amount 映射的源列 '{src_col}' 不存在"
+                )
+            return pd.to_numeric(df[src_col], errors="coerce").fillna(0)
+
+        raise ValueError(
+            f"平台 {self.config.platform!r}: "
+            "必须在 field_mapping 中指定 'amount' 或提供 'amount_formula'"
+        )
+
+    def _build_source_id(
+        self,
+        raw_df: pd.DataFrame,
+        result: pd.DataFrame,
+        mapping: dict[str, str],
+    ) -> pd.Series:
+        """
+        构建原始记录唯一标识。
+
+        优先级：
+          1. field_mapping 中明确映射了 source_id → 使用对应源列值
+          2. order_no 已映射 → "{platform}_{order_no}"
+          3. 兜底 → "{platform}_{行索引}"
+        """
+        platform = self.config.platform
+
+        # 优先级 1：显式映射
+        if "source_id" in mapping and mapping["source_id"] in raw_df.columns:
+            return raw_df[mapping["source_id"]].astype(str)
+
+        # 优先级 2：用 order_no
+        if "order_no" in result.columns and result["order_no"].notna().any():
+            return platform + "_" + result["order_no"].fillna("").astype(str)
+
+        # 兜底：行索引
+        return pd.Series(
+            [f"{platform}_{i}" for i in range(len(result))],
+            index=result.index,
+        )

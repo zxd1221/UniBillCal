@@ -11,15 +11,16 @@ from unibillcal.core.processing_config import ProcessingConfig
 def unified_df():
     """模拟来自多平台标准化后合并的 DataFrame"""
     return pd.DataFrame({
-        "date":     ["2024-01-05", "2024-01-05", "2024-01-05",
-                     "2024-01-06", "2024-01-06", "2024-01-07"],
-        "store":    ["旗舰店A", "旗舰店A", "旗舰店B",
-                     "旗舰店A", "旗舰店C", "旗舰店B"],
-        "order_id": ["ALI001", "ALI006", "ALI002",
-                     "ALI003", "ALI004", "WX001"],
-        "amount":   [100.0, 60.0, 200.0, 130.0, 80.0, 500.0],
-        "platform": ["alipay", "alipay", "alipay",
-                     "alipay", "alipay", "wechat"],
+        "business_date": ["2024-01-05", "2024-01-05", "2024-01-05",
+                          "2024-01-06", "2024-01-06", "2024-01-07"],
+        "store_name":    ["旗舰店A", "旗舰店A", "旗舰店B",
+                          "旗舰店A", "旗舰店C", "旗舰店B"],
+        "order_no":      ["ALI001", "ALI006", "ALI002",
+                          "ALI003", "ALI004", "WX001"],
+        "amount":        [100.0, 60.0, 200.0, 130.0, 80.0, 500.0],
+        "raw_amount":    [100.0, 60.0, 200.0, 130.0, 80.0, 500.0],
+        "platform":      ["alipay", "alipay", "alipay",
+                          "alipay", "alipay", "wechat"],
     })
 
 
@@ -41,7 +42,7 @@ class TestUnifiedProcessor:
 
         # 旗舰店A 跨 alipay 平台：100+60+130=290
         store_a_alipay = result[
-            (result["store"] == "旗舰店A") & (result["platform"] == "alipay")
+            (result["store_name"] == "旗舰店A") & (result["platform"] == "alipay")
         ]
         assert store_a_alipay["amount"].sum() == pytest.approx(290.0)
 
@@ -53,8 +54,8 @@ class TestUnifiedProcessor:
 
         # 旗舰店A 在 2024-01-05 有2笔
         a5 = result[
-            (result["store"] == "旗舰店A") &
-            (result["date"] == "2024-01-05") &
+            (result["store_name"] == "旗舰店A") &
+            (result["business_date"] == "2024-01-05") &
             (result["platform"] == "alipay")
         ]
         assert a5["order_count"].iloc[0] == 2
@@ -71,7 +72,7 @@ class TestUnifiedProcessor:
         refs_cfg = [{
             "name": "category_mapping",
             "source": {"type": "excel", "path": "dummy.xlsx"},
-            "join_on": {"left": "store", "right": "商家名称"},
+            "join_on": {"left": "store_name", "right": "商家名称"},
             "fields": {"category": "类目名称", "subject": "科目代码"},
         }]
         config = ProcessingConfig.from_dict({"references": refs_cfg})
@@ -83,7 +84,7 @@ class TestUnifiedProcessor:
             joined = processor._join_references(unified_df.copy())
 
         assert "category" in joined.columns
-        assert joined[joined["store"] == "旗舰店A"]["category"].iloc[0] == "服装"
+        assert joined[joined["store_name"] == "旗舰店A"]["category"].iloc[0] == "服装"
 
     def test_no_references_passthrough(self, unified_df):
         """无关联配置表时，数据应正常通过"""
@@ -96,13 +97,13 @@ class TestUnifiedProcessor:
         """修改 GROUP_BY_FIELDS 常量可以改变汇总维度"""
         config = ProcessingConfig.from_dict({})
         processor = UnifiedProcessor(config)
-        # 只按 store 分组（模拟修改业务规则）
+        # 只按 store_name 分组（模拟修改业务规则）
         original_group_by = UnifiedProcessor.GROUP_BY_FIELDS
         try:
-            UnifiedProcessor.GROUP_BY_FIELDS = ["store"]
+            UnifiedProcessor.GROUP_BY_FIELDS = ["store_name"]
             result = processor._aggregate(unified_df)
             # 旗舰店A 跨平台跨日期全部合并
-            store_a = result[result["store"] == "旗舰店A"]
+            store_a = result[result["store_name"] == "旗舰店A"]
             assert store_a["amount"].iloc[0] == pytest.approx(290.0)
         finally:
             UnifiedProcessor.GROUP_BY_FIELDS = original_group_by

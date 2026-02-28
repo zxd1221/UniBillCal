@@ -26,10 +26,11 @@ class PlatformConfig:
       description:    描述（可选）
       source:         数据源（type + 位置信息）
       filter:         行过滤条件（可选）
-      field_mapping:  标准字段 -> 源字段的映射
-      amount_formula: 金额计算公式（与 field_mapping.amount 二选一）
-      extra_fields:   额外保留的源字段（可选）
-      output:         标准化结果的输出位置（可选）
+      field_mapping:  统一字段名 -> 源字段名 的映射
+                      统一字段名须使用标准名：business_date / store_name / order_no 等
+      amount_formula: 金额计算公式（使用源字段名，与 field_mapping.amount 二选一）
+      extra_fields:   额外保留的源字段（可选，以原始列名指定）
+      output:         标准化结果的中间输出位置（可选）
     """
 
     def __init__(self, config: dict):
@@ -112,8 +113,16 @@ class PlatformConfig:
         if "type" not in self._cfg["source"]:
             raise ValueError("source 配置缺少 'type' 字段（excel 或 sqlserver）")
 
-        if "date" not in self._cfg.get("field_mapping", {}):
-            raise ValueError("field_mapping 必须包含 'date' 字段")
+        if "business_date" not in self._cfg.get("field_mapping", {}):
+            raise ValueError(
+                "field_mapping 必须包含 'business_date' 字段（对应源数据的日期列）"
+            )
 
-        if "amount" not in self._cfg.get("field_mapping", {}) and not self._cfg.get("amount_formula"):
-            raise ValueError("必须在 field_mapping 中指定 'amount' 或提供 'amount_formula'")
+        has_amount = (
+            "amount" in self._cfg.get("field_mapping", {})
+            or self._cfg.get("amount_formula")
+        )
+        if not has_amount:
+            raise ValueError(
+                "必须在 field_mapping 中指定 'amount' 或提供 'amount_formula'"
+            )

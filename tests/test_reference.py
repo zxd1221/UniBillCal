@@ -9,10 +9,10 @@ from unibillcal.core.reference import ReferenceManager
 @pytest.fixture
 def mapped_df():
     return pd.DataFrame({
-        "date":     ["2024-01-05", "2024-01-05", "2024-01-06"],
-        "store":    ["旗舰店A", "旗舰店B", "旗舰店A"],
-        "amount":   [90.0, 200.0, 130.0],
-        "platform": ["alipay"] * 3,
+        "business_date": ["2024-01-05", "2024-01-05", "2024-01-06"],
+        "store_name":    ["旗舰店A", "旗舰店B", "旗舰店A"],
+        "amount":        [90.0, 200.0, 130.0],
+        "platform":      ["alipay"] * 3,
     })
 
 
@@ -30,7 +30,7 @@ class TestReferenceManager:
         refs_cfg = [{
             "name": "category_mapping",
             "source": {"type": "excel", "path": "dummy.xlsx"},
-            "join_on": {"left": "store", "right": "商家名称"},
+            "join_on": {"left": "store_name", "right": "商家名称"},
             "fields": {"category": "类目名称", "subject": "科目代码"},
         }]
 
@@ -41,20 +41,20 @@ class TestReferenceManager:
 
         assert "category" in result.columns
         assert "subject" in result.columns
-        assert result[result["store"] == "旗舰店A"]["category"].iloc[0] == "服装"
-        assert result[result["store"] == "旗舰店B"]["category"].iloc[0] == "电子"
+        assert result[result["store_name"] == "旗舰店A"]["category"].iloc[0] == "服装"
+        assert result[result["store_name"] == "旗舰店B"]["category"].iloc[0] == "电子"
 
     def test_unmatched_store_gets_nan(self, mapped_df, category_ref):
         df = mapped_df.copy()
-        df.loc[2, "store"] = "未知店铺"
+        df.loc[2, "store_name"] = "未知店铺"
         refs_cfg = [{
             "name": "category_mapping",
             "source": {"type": "excel", "path": "dummy.xlsx"},
-            "join_on": {"left": "store", "right": "商家名称"},
+            "join_on": {"left": "store_name", "right": "商家名称"},
             "fields": {"category": "类目名称"},
         }]
         mgr = ReferenceManager(refs_cfg)
         with patch.object(mgr, "_cache", {"excel:dummy.xlsx": category_ref}):
             result = mgr.apply(df)
 
-        assert pd.isna(result[result["store"] == "未知店铺"]["category"].iloc[0])
+        assert pd.isna(result[result["store_name"] == "未知店铺"]["category"].iloc[0])

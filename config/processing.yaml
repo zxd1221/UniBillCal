@@ -2,31 +2,30 @@
 # 统一处理配置 - 所有平台共用
 #
 # 包含：
-#   1. 公共配置表（类目/科目映射）的数据源位置和关联方式
+#   1. 公共配置表（类目/科目映射）的数据源 和 关联方式
 #   2. 最终输出位置
 #
-# 不包含：汇总计算规则（GROUP BY 字段、SUM 字段等在 processor.py 中）
+# 不包含：汇总计算规则（GROUP BY / SUM 等在 processor.py 代码中）
 # ============================================================
 
 # ----------------------------------------------------------
-# 公共配置表关联
-# 标准化后的统一数据会与这些表进行 LEFT JOIN
+# 公共配置表关联（在所有平台标准化、合并后执行）
+# join_on.left 使用统一字段名（非原始列名）
 # ----------------------------------------------------------
 references:
-  # 类目 + 科目映射（按店铺名称关联）
   - name: category_mapping
     source:
       type: excel
       path: config/category_map.xlsx
-      sheet: 通用                # 所有平台共用同一个 sheet
+      sheet: 通用
     join_on:
-      left: store               # 统一格式字段名（已标准化）
+      left: store_name          # 统一格式字段名
       right: 商家名称            # 配置表中的字段名
     fields:
       category: 类目名称         # 目标字段名: 配置表列名
-      subject: 科目代码
+      subject:  科目代码
 
-  # 示例：若需要二级科目，可继续添加
+  # 二级映射示例（按需启用）
   # - name: subject_detail
   #   source:
   #     type: sqlserver
@@ -39,27 +38,16 @@ references:
   #     subject_name: subject_name_cn
 
 # ----------------------------------------------------------
-# 最终输出（汇总后的结果）
-# 所有平台数据合并汇总后，写到这里
+# 最终输出（汇总后的统一标准数据）
 # ----------------------------------------------------------
 output:
-  type: excel                   # excel 或 sqlserver
+  type: excel
   path: output/result.xlsx
-  sheet: 汇总结果
-  mode: overwrite               # overwrite 或 append
-
-  # 金蝶凭证输出示例（将 type 改为 kingdee）：
-  # type: kingdee
-  # path: output/voucher.xlsx
-  # sheet: 凭证导入
-  # voucher_type: 记账凭证
-  # debit_subject: "1122.01"
-  # credit_subject: "6001.01"
-  # summary_template: "{store} {date} 销售收入"
-  # currency: RMB
+  sheet: 统一账单汇总
+  mode: overwrite
 
   # SQL Server 输出示例：
   # type: sqlserver
   # connection_string: "mssql+pyodbc://sa:password@localhost/BillDB?driver=ODBC+Driver+17+for+SQL+Server"
-  # table: bill_result
+  # table: unified_bill_result
   # mode: append

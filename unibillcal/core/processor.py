@@ -1,7 +1,7 @@
 """
 UnifiedProcessor - 统一账单业务逻辑处理器
 
-职责：对来自所有平台的标准化账单数据，执行统一的业务计算。
+职责：对来自所有平台的标准化账单执行统一的业务计算。
 
 ════════════════════════════════════════════════════════════
   新增平台？  → 只需添加平台配置文件，无需修改本文件
@@ -10,7 +10,8 @@ UnifiedProcessor - 统一账单业务逻辑处理器
 
 处理流程：
   1. 关联公共配置表（类目/科目映射）
-  2. 汇总计算（统一维度分组 + 金额求和）
+  2. 金额规范化（正负方向处理）
+  3. 分组汇总（统一维度 + 金额求和）
 """
 
 from __future__ import annotations
@@ -29,8 +30,8 @@ class UnifiedProcessor:
     对合并后的标准化账单执行统一业务逻辑。
 
     ┌─────────────────────────────────────────────────────────┐
-    │  [可修改] 业务规则常量                                   │
-    │  修改下面的常量即可调整汇总维度、金额来源等业务规则       │
+    │  [可修改] 区域                                           │
+    │  修改下方常量和方法即可调整业务规则，无需改动其他代码    │
     └─────────────────────────────────────────────────────────┘
     """
 
@@ -38,27 +39,27 @@ class UnifiedProcessor:
     # [可修改] 汇总维度 - 按这些字段分组汇总
     # ================================================================
     GROUP_BY_FIELDS: list[str] = [
-        "date",
-        "store",
+        "business_date",
+        "store_name",
         "category",
         "subject",
         "platform",
     ]
 
     # ================================================================
-    # [可修改] 求和字段 - 这些字段在分组内求和
+    # [可修改] 求和字段 - 分组内对这些字段求和
     # ================================================================
     SUM_FIELDS: list[str] = ["amount"]
 
     # ================================================================
-    # [可修改] 订单计数字段名（None 表示不统计订单数）
+    # [可修改] 订单计数字段名（None 表示不统计）
     # ================================================================
     ORDER_COUNT_FIELD: str | None = "order_count"
 
     # ================================================================
-    # [可修改] 订单 ID 字段名（用于计数）
+    # [可修改] 用于计数的订单号字段名
     # ================================================================
-    ORDER_ID_FIELD: str = "order_id"
+    ORDER_NO_FIELD: str = "order_no"
 
     def __init__(self, config: ProcessingConfig):
         self.config = config
@@ -69,18 +70,20 @@ class UnifiedProcessor:
 
     def process(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        执行完整的统一处理：关联配置表 → 汇总计算。
+        执行完整统一处理：关联配置表 → 金额规范化 → 汇总。
 
         Args:
-            df: 所有平台标准化后合并的 DataFrame（统一字段格式）
+            df: 所有平台标准化后合并的 DataFrame
 
         Returns:
-            汇总后的 DataFrame，包含 category / subject / amount / order_count 等
+            汇总后的 DataFrame（含 category / subject / amount / order_count 等）
         """
         logger.info("统一处理开始，输入 %d 行", len(df))
 
         df = self._join_references(df)
         logger.info("关联配置表完成，列: %s", list(df.columns))
+
+        df = self._normalize_amount(df)
 
         df = self._aggregate(df)
         logger.info("汇总完成，共 %d 行", len(df))
@@ -95,11 +98,29 @@ class UnifiedProcessor:
         """
         关联公共配置表（类目映射、科目映射等）。
 
-        [可修改] 如需添加额外的关联逻辑（如多级映射、兜底规则），在此处扩展。
+        [可修改] 如需增加多级映射、兜底规则、模糊匹配等，在此扩展。
         """
         if not self.config.references:
             return df
         return ReferenceManager(self.config.references).apply(df)
+
+    # ------------------------------------------------------------------ #
+    # [可修改] 金额规范化
+    # ------------------------------------------------------------------ #
+
+    def _normalize_amount(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        对 amount 字段进行业务规范化（正负方向处理等）。
+
+        [可修改] 默认不做额外处理（amount 已由 Mapper 按公式计算）。
+        如需按交易类型区分收支正负，在此实现，例如：
+
+            mask = df["transaction_type"] == "退款"
+            df.loc[mask, "amount"] = -df.loc[mask, "amount"].abs()
+
+        注意：此方法修改 amount，raw_amount 保持不变（原始计算值）。
+        """
+        return df
 
     # ------------------------------------------------------------------ #
     # [可修改] 汇总计算
@@ -109,32 +130,29 @@ class UnifiedProcessor:
         """
         按统一维度分组汇总。
 
-        [可修改] 修改此方法以调整汇总规则，例如：
-          - 改变分组维度：修改 GROUP_BY_FIELDS 常量
-          - 增加加权平均：在 agg_dict 中添加 mean 规则
-          - 增加自定义列：在 result 上追加新列
+        [可修改] 调整汇总规则示例：
+          - 改变分组维度 → 修改 GROUP_BY_FIELDS 常量
+          - 增加均值列   → 在 agg_dict 中添加 mean 项
+          - 不做汇总     → 直接 return df
         """
-        # 只使用 DataFrame 中实际存在的分组字段
         group_fields = [f for f in self.GROUP_BY_FIELDS if f in df.columns]
         if not group_fields:
-            logger.warning("分组字段均不存在于数据中，跳过汇总")
+            logger.warning("GROUP_BY_FIELDS 中的字段均不在数据中，跳过汇总")
             return df
 
         agg_dict: dict = {}
 
-        # 求和字段
         for col in self.SUM_FIELDS:
             if col in df.columns:
                 agg_dict[col] = (col, "sum")
 
-        # 订单计数
-        if self.ORDER_COUNT_FIELD and self.ORDER_ID_FIELD in df.columns:
-            agg_dict[self.ORDER_COUNT_FIELD] = (self.ORDER_ID_FIELD, "count")
-        elif self.ORDER_COUNT_FIELD:
-            # order_id 不存在时，按行数计数
-            df = df.copy()
-            df["_row_"] = 1
-            agg_dict[self.ORDER_COUNT_FIELD] = ("_row_", "sum")
+        if self.ORDER_COUNT_FIELD:
+            if self.ORDER_NO_FIELD in df.columns:
+                agg_dict[self.ORDER_COUNT_FIELD] = (self.ORDER_NO_FIELD, "count")
+            else:
+                df = df.copy()
+                df["_cnt_"] = 1
+                agg_dict[self.ORDER_COUNT_FIELD] = ("_cnt_", "sum")
 
         if not agg_dict:
             return df.drop_duplicates(subset=group_fields).reset_index(drop=True)
@@ -144,9 +162,5 @@ class UnifiedProcessor:
             .agg(**{k: pd.NamedAgg(column=v[0], aggfunc=v[1]) for k, v in agg_dict.items()})
             .reset_index()
         )
-
-        # 清理临时列
-        if "_row_" in df.columns:
-            result = result.drop(columns=["_row_"], errors="ignore")
 
         return result

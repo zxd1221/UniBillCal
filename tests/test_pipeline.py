@@ -12,9 +12,9 @@ def make_platform_config(platform="alipay", extra=None):
         "platform": platform,
         "source": {"type": "excel", "path": "dummy.xlsx"},
         "field_mapping": {
-            "date": "交易时间",
-            "store": "商家名称",
-            "order_id": "商户订单号",
+            "business_date": "交易时间",
+            "store_name":    "商家名称",
+            "order_no":      "商户订单号",
         },
         "amount_formula": "支付金额 - 退款金额",
     }
@@ -37,8 +37,8 @@ class TestBillPipeline:
         pipeline = make_pipeline()
         result = pipeline.run(source_dfs={"alipay": alipay_raw_df})
 
-        assert "date" in result.columns
-        assert "store" in result.columns
+        assert "business_date" in result.columns
+        assert "store_name" in result.columns
         assert "amount" in result.columns
         assert "order_count" in result.columns
         assert "platform" in result.columns
@@ -49,7 +49,7 @@ class TestBillPipeline:
         """旗舰店A 跨日期总金额：(100+60+130)=290"""
         pipeline = make_pipeline()
         result = pipeline.run(source_dfs={"alipay": alipay_raw_df})
-        store_a = result[result["store"] == "旗舰店A"]
+        store_a = result[result["store_name"] == "旗舰店A"]
         assert store_a["amount"].sum() == pytest.approx(290.0)
 
     def test_filter_applied(self, alipay_raw_df):
@@ -58,7 +58,7 @@ class TestBillPipeline:
             "filter": {"column": "商家名称", "op": "eq", "value": "旗舰店A"}
         })
         result = pipeline.run(source_dfs={"alipay": alipay_raw_df})
-        assert (result["store"] == "旗舰店A").all()
+        assert (result["store_name"] == "旗舰店A").all()
 
     def test_multi_platform(self, alipay_raw_df, wechat_raw_df):
         """多平台合并后统一处理"""
@@ -66,9 +66,9 @@ class TestBillPipeline:
             "platform": "wechat",
             "source": {"type": "excel", "path": "dummy.xlsx"},
             "field_mapping": {
-                "date": "交易时间",
-                "store": "商品名称",
-                "order_id": "微信单号",
+                "business_date": "交易时间",
+                "store_name":    "商品名称",
+                "order_no":      "微信单号",
             },
             "amount_formula": "金额(元) - 退款金额(元)",
         })
@@ -84,13 +84,13 @@ class TestBillPipeline:
         assert "alipay" in platforms
         assert "wechat" in platforms
 
-    def test_config_validation_missing_date(self):
-        """缺少 date 字段映射应在配置加载时报错"""
-        with pytest.raises(ValueError, match="date"):
+    def test_config_validation_missing_business_date(self):
+        """缺少 business_date 字段映射应在配置加载时报错"""
+        with pytest.raises(ValueError, match="business_date"):
             PlatformConfig.from_dict({
                 "platform": "test",
                 "source": {"type": "excel", "path": "x.xlsx"},
-                "field_mapping": {"store": "商家名称"},
+                "field_mapping": {"store_name": "商家名称"},
                 "amount_formula": "金额",
             })
 
@@ -100,9 +100,9 @@ class TestBillPipeline:
             "platform": "wechat",
             "source": {"type": "excel", "path": "dummy.xlsx"},
             "field_mapping": {
-                "date": "交易时间",
-                "store": "商品名称",
-                "order_id": "微信单号",
+                "business_date": "交易时间",
+                "store_name":    "商品名称",
+                "order_no":      "微信单号",
             },
             "amount_formula": "金额(元) - 退款金额(元)",
         })
@@ -112,5 +112,5 @@ class TestBillPipeline:
         ).run(source_dfs={"wechat": wechat_raw_df})
 
         assert len(result) > 0
-        store_y = result[result["store"] == "店铺Y商品"]
+        store_y = result[result["store_name"] == "店铺Y商品"]
         assert store_y["amount"].iloc[0] == pytest.approx(270.0)
